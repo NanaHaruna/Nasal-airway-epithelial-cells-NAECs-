@@ -1,5 +1,5 @@
 ---
-title: "Revision"
+title: "NAECS"
 output: html_document
 date: "2024-10-09"
 ---
@@ -17,6 +17,19 @@ library(tidyr)
 library(viridis)
 ```
 
+```{r}
+##  Loading the files
+readRDS("DN1.rds") ->DN1
+readRDS("DN2.rds") ->DN2
+readRDS("DN3.rds") ->DN3
+readRDS("DN4.rds") ->DN4
+readRDS("DN5.rds") ->DN5
+readRDS("DN8.rds") ->DN8
+readRDS("DN11.rds") ->DN11
+readRDS("DN12.rds") ->DN12
+readRDS("DN15.rds") ->DN15
+
+```
 ```{r}
 ## Integration of all the samples 
 
