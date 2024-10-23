@@ -1,0 +1,335 @@
+---
+title: "Revision"
+output: html_document
+date: "2024-10-09"
+---
+```{r}
+## Load packages
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(hdf5r)
+library(Matrix)
+library(scCustomize)
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(viridis)
+```
+
+```{r}
+## Integration of all the samples 
+
+## preserving their identify before integration
+
+DN1$group<-sample(c("Control"), size=ncol(DN1), replace=TRUE)
+DN2$group<-sample(c("Control"), size=ncol(DN2), replace=TRUE)
+DN3$group<-sample(c("Wheeze"), size=ncol(DN3), replace=TRUE)
+DN4$group<-sample(c("RSV"), size=ncol(DN4), replace=TRUE)
+DN5$group<-sample(c("RSV"), size=ncol(DN5), replace=TRUE)
+DN8$group<-sample(c("WheezeRSV"), size=ncol(DN8), replace=TRUE)
+DN11$group<-sample(c("Wheeze"), size=ncol(DN11), replace=TRUE)
+DN12$group<-sample(c("RSV"), size=ncol(DN12), replace=TRUE)
+DN15$group<-sample(c("WheezeRSV"), size=ncol(DN15), replace=TRUE)
+
+
+Intlist<-list(DN1,DN2,DN3, DN4, DN5, DN8, DN11, DN12, DN15 )
+Intlist<-lapply(X=Intlist,FUN=function(x){
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+features <- SelectIntegrationFeatures(object.list = Intlist)
+IntAnchors <- FindIntegrationAnchors(object.list = Intlist, anchor.features = features)
+Int<- IntegrateData(anchorset = IntAnchors, k.weight = 50)
+
+
+
+```
+
+```{r}
+## Checking for low quality reads 
+Int[["percent.mt"]] <- PercentageFeatureSet(Int, pattern = "^MT-", assay = "integrated")
+
+VlnPlot(Int, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+
+
+```
+
+```{r}
+
+## Using harmony to stabilize the integrated dataset
+library(harmony)
+
+
+Int <- RunHarmony(Int2, group.by.vars = "group")
+
+# Run PCA and UMAP
+Int <- RunPCA(Int,  dims = 1:30)
+Int <- RunUMAP(Int, reduction = "pca", dims = 1:30)
+
+# Clustering
+Int <- FindNeighbors(Int, reduction = "pca", dims = 1:30)
+Int <- FindClusters(Int, resolution = 0.5)
+
+# Visualization
+DimPlot(Int, reduction = "umap", group.by = "seurat_clusters")
+
+saveRDS(Int,file="AllDNIntegration.rds")
+```
+
+```{r}
+
+## Loading the integrated object and performing QC to verify that there hasn't been over clustering
+
+ readRDS("AllDNIntegration.rds") ->Int
+
+
+DimPlot(Int, reduction = "umap", label = TRUE, repel = TRUE)
+
+
+ElbowPlot(Int)
+
+Int <- JackStraw(Int, num.replicate = 100)
+Int <- ScoreJackStraw(Int, dims = 1:20)
+
+JackStrawPlot(Int, dims = 1:20)
+```
+```{r}
+
+##Assigning cell identity to clusters 
+
+new.cluster.id <- c("Club 3",
+     "Ciliated precursor 1",
+      "Goblet 2",
+      "Club precursor 2",
+      "Ciliated mature",
+      "Deuterosomal 2",
+      "Early progenitor 1",
+      "Club 2",
+      "Basal",
+      "Club 1",
+      "Parabasal",
+      "Basal activated",
+      "Early progenitor 2",
+      "Club precursor",
+      "Goblet 1",
+      "Deuterosomal 1",
+      "Basal cycling",
+      "Parabasal 2")
+
+names(new.cluster.id) <- levels(Int)
+
+Int<- RenameIdents(Int, new.cluster.id)
+
+Int$celltype <- Idents(Int)
+
+
+DimPlot(Int, label = TRUE, reduction = "umap", repel = TRUE
+      )
+
+
+```
+
+```{r}
+
+## Generating dot plot for selected genes
+
+marker_genes = c("SNTN", "PROS1", "HYDIN", "DNAAF1", "DNAH12", "FOXJ1", "TOP2A", "DEUP1", "TP63", "rna_BCAM", "rna_NOTCH1", "KRT5", "KRT14", "STMN1", "rna_RBPJ", "KRT8", "SERPINB3", "MSMB", "SCGB3A1", "SCGB1A1", "MMP10", "MUC5AC", "CEACAM5", "CST1", "CFTR") 
+
+## Let's get the scaled/log-transformed counts of these genes from the Seurat object
+
+exp_mat <- FetchData(object = Int, vars = marker_genes, layer = "data")
+## Let's get cell metadata now
+
+meta <-Int@meta.data %>% 
+  select(seurat_clusters)
+
+## Merge in the expression data. Just need to transpose it so that cells are down the rows.
+
+meta <- bind_cols(meta, exp_mat)
+head(meta) #View the first few lies
+
+## To work with ggplot2, we need to get our data in long/tidy format
+
+meta <- pivot_longer(meta, -seurat_clusters, names_to="Gene", values_to="Expression")
+
+meta_summary <- meta %>%
+  group_by(seurat_clusters, Gene) %>%
+  summarise(Avg = mean(Expression),
+            Pct = sum(Expression > 0) / length(Expression) * 100)
+
+
+## Plot function but first keep the gene list order
+
+meta_summary$Gene <- factor(meta_summary$Gene, levels=marker_genes)
+
+#meta_summary$seurat_clusters<- factor(meta_summary$seurat_clusters, levels = c(12, 0,1,2,3,4,5,7,6,8,9,10,11, 13,14,15,16,17))
+dot_plot <- ggplot(meta_summary, aes(x=Gene, y=seurat_clusters)) +
+  geom_point(aes(size = Pct, fill = Avg), color="black", shape=21) +
+  scale_size("% detected", range = c(0,5)) +
+  scale_fill_gradientn(colours = viridisLite::plasma(5),
+                       guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black"),
+                       name = "Average\nexpression") +
+  ylab("Cluster") + xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=14, angle=45, hjust=1, color="black"),
+        axis.text.y = element_text(size=15, color="black"),
+        axis.title = element_text(size=14))
+
+dot_plot
+
+
+```
+
+
+
+
+
+
+```{r}
+## I want to work with this integrated object on Python so I will convert the seurat object to anndata
+library(Seurat)
+library(SeuratData)
+library(SeuratDisk)
+
+
+SaveH5Seurat(Int, filename = "Int.h5Seurat")
+Convert("Int.h5Seurat", dest = "h5ad")
+```
+
+
+
+```{r}
+## Next I will perfrom slingshot trajectory analysis on the subsetted object
+
+## Save the objects as separate matrices for input in slingshot
+dimred <- Int@reductions$umap@cell.embeddings
+clustering <- Int$integrated_snn_res.0.5
+counts <- as.matrix(Int@assays$RNA@counts[Int@assays$RNA@var.features, ])
+
+## Define a color pallete to use
+pal <- c(RColorBrewer::brewer.pal(9, "Set1"), RColorBrewer::brewer.pal(8, "Set2"))
+
+## Run default Slingshot lineage identification
+set.seed(1)
+lineages <- getLineages(data = dimred, clusterLabels = clustering, #end.clus = c( "4", "12"), #define how many branches/lineages to consider, and whcih cluster to start and end the lineage 
+                        #start.clus = c("9"),
+                 #omega = TRUE  
+                         )
+
+lineages
+
+
+
+## Plot the lineages
+par(mfrow = c(1, 2))
+plot(dimred[, 1:2], col = pal[clustering], cex = 0.5, pch = 16)
+for (i in levels(clustering)) {
+    text(mean(dimred[clustering == i, 1]), mean(dimred[clustering == i, 2]), labels = i, font = 2)
+}
+plot(dimred[, 1:2], col = pal[clustering], cex = 0.5, pch = 16)
+lines(SlingshotDataSet(lineages), lwd=2, col='black', show.constraints = TRUE)
+```
+```{r}
+wheeze.subset <- subset(x = Int, subset = group == "Wheeze")
+control.subset <- subset(x = Int, subset = group == "Control")
+
+dimred.w <- wheeze.subset@reductions$umap@cell.embeddings
+#choose "integrated_snn_res.0.5" for integrated objects and "RNA_snn_res.0.5" for single Seurat objects, check that "0.5" is correct in meta.data table (can call by str(wheeze.subset))
+clustering.w <- wheeze.subset$RNA_snn_res.0.5
+counts.w <- as.matrix(wheeze.subset@assays$RNA@counts[wheeze.subset@assays$RNA@var.features, ])
+## Define a color pallete to use
+pal <- c(RColorBrewer::brewer.pal(9, "Set1"), RColorBrewer::brewer.pal(8, "Set2"))
+
+set.seed(1)
+lineages.w <- getLineages(data = dimred.w, clusterLabels = clustering.w , end.clus = c( "6"), start.clus = c("10"))
+lineages <- getLineages(data = dimred, clusterLabels = clustering, #end.clus = c( "4", "12"), #define how many branches/lineages to consider, and whcih cluster to start and end the lineage 
+                        start.clus = c("9"),
+                 #omega = TRUE  
+                         )
+
+lineages.w
+
+par(mfrow = c(1, 2))
+plot(dimred.w[, 1:2], col = pal[clustering.w], cex = 0.5, pch = 16)
+for (i in levels(clustering.w)) {
+    text(mean(dimred.w[clustering.w == i, 1]), mean(dimred.w[clustering.w == i, 2]), labels = i, font = 2)
+}
+plot(dimred.w[, 1:2], col = pal[clustering.w], cex = 0.5, pch = 16)
+lines(SlingshotDataSet(lineages.w), lwd=2, col='red')
+
+
+#slingshot script for overlaying trajectories of two conditions (control and wheeze in this case)
+dimred.c <- control.subset@reductions$umap@cell.embeddings
+clustering.c <- control.subset$integrated_snn_res.0.5
+counts.c <- as.matrix(control.subset@assays$RNA@counts[control.subset@assays$RNA@var.features, ])
+## Define a color pallete to use
+pal <- c(RColorBrewer::brewer.pal(9, "Set1"), RColorBrewer::brewer.pal(8, "Set2"))
+#defining lineage trajectories
+set.seed(1)
+lineages.c <- getLineages(data = dimred.c, clusterLabels = clustering.c, end.clus = c( "6"), start.clus = c("10"))
+lineages.c
+#drawing plots for controls
+par(mfrow = c(1, 2))
+plot(dimred.c[, 1:2], col = pal[clustering.c], cex = 0.5, pch = 16)
+for (i in levels(clustering.c)) {
+    text(mean(dimred.c[clustering.c == i, 1]), mean(dimred.c[clustering.c == i, 2]), labels = i, font = 2)
+}
+plot(dimred.c[, 1:2], col = pal[clustering.c], cex = 0.5, pch = 16)
+lines(SlingshotDataSet(lineages.c), lwd=2, col='blue')
+
+# calling lines() again overlays new plot over the previous plot
+lines(SlingshotDataSet(lineages.w), lwd=2, col='red')
+
+#plotting only lines overlapped in a single plot frame for two conditions of interest
+par(mfrow = c(1, 1))
+plot(SlingshotDataSet(lineages.c), lwd=2, col='blue')
+lines(SlingshotDataSet(lineages.w), lwd=2, col='red')
+
+
+
+```
+
+```{r}
+## Now to perform pseudobulk analysis between the groups
+
+DimPlot(Int, group.by = "group")
+
+
+# pseudobulk the counts based on donor-condition-celltype
+pseudo_Int <- AggregateExpression(Int, assays = "RNA", return.seurat = T, group.by = c("group", "seurat_clusters"))
+
+# each 'cell' is a donor-condition-celltype pseudobulk profile
+tail(Cells(pseudo_Int))
+
+pseudo_Int$condition <- paste(pseudo_Int$seurat_clusters, pseudo_Int$group, sep = "_")
+
+
+Idents(pseudo_Int) <- "group"
+
+bulk.RSV <- FindMarkers(object = pseudo_Int, 
+                         ident.1 = "RSV", 
+                         ident.2 = "Control",
+                         test.use = "DESeq2")
+
+bulk.Wheeze <- FindMarkers(object = pseudo_Int, 
+                         ident.1 = "Wheeze", 
+                         ident.2 = "Control",
+                         test.use = "DESeq2")
+
+bulk.WheezeRSV <- FindMarkers(object = pseudo_Int, 
+                         ident.1 = "WheezeRSV", 
+                         ident.2 = "Control",
+                         test.use = "DESeq2")
+
+
+## I will save the output as an excel file
+library("writexl")
+write_xlsx(bulk.RSV,"C:\\Users\\nanah\\Downloads\\bulk.RSV.xlsx")
+
+write_xlsx(bulk.Wheeze,"C:\\Users\\nanah\\Downloads\\bulk.Wheeze.xlsx")
+
+write_xlsx(bulk.WheezeRSV,"C:\\Users\\nanah\\Downloads\\bulk.WheezeRSV.xlsx")
+```
